@@ -15,7 +15,7 @@ from PIL import Image, ImageFile
 from torch import optim
 from tqdm import tqdm
 
-from dataset import GeoCrisisDataModule
+from dataset import CrisisLandMarkDataModule
 from models import CLOSP, GeoCLOSP, SkyScript
 
 EPOCHS = 30
@@ -38,7 +38,7 @@ def main(args: DictConfig):
 
     experiment.log_parameters(OmegaConf.to_container(args))
 
-    dm = GeoCrisisDataModule(**args.dataset)
+    dm = CrisisLandMarkDataModule(**args.dataset)
     dm.setup("fit")
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
