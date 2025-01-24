@@ -1,0 +1,14 @@
+warmup: 1
+lr: 1e-6
+model:
+  text_model: &model sentence-transformers/all-MiniLM-L6-v2
+  freeze_pretrained: true
+  vision_model: resnet50
+  scale: 1.0
+dataset:
+  root: "data"
+  num_workers: 8
+  batch_size: 64
+  satellite_type: "all"
+  tokenizer: *model
+  context_length: 64
