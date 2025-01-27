@@ -16,6 +16,9 @@ _REPOSITORY IN CONSTRUCTION SOME FILES COULD BE MISSING_
 
 ### Corpus
 
+A partial dataset was released anonymously on [Zenodo](https://zenodo.org/records/14750808) due to size limitation (46GB for this release).
+The full non-anonymous version will be released on HuggingFace.
+
 _SOON_
 
 ### Models
