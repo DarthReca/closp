@@ -157,6 +157,9 @@ class CLOSP(torch.nn.Module):
             image = self.train_transform(image)
             image_embed = self.s2_projection(self.s2_encoder(image))
 
+        image_embed = F.normalize(image_embed, p=2, dim=-1)
+        text_embed = F.normalize(text_embed, p=2, dim=-1)
+
         logits_per_image = self.scale * image_embed @ text_embed.T
         logits_per_text = self.scale * text_embed @ image_embed.T
 
@@ -228,6 +231,8 @@ class GeoCLOSP(CLOSP):
 
         location_embed = self.location_encoder(coords)
         location_embed = self.location_projection(location_embed)
+
+        location_embed = F.normalize(location_embed, p=2, dim=-1)
 
         logits_per_loc_img = self.scale * location_embed @ image_embed.T
         logits_per_img_loc = self.scale * image_embed @ location_embed.T
