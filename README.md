@@ -2,7 +2,9 @@
   
 ## Text-to-Remote-Sensing-Image retrieval beyond RGB sources
 
-**Anonymous**
+[**Daniele Rege Cambrin**](https://darthreca.github.io/)<sup>1</sup> · [**Lorenzo Vaiani**]()<sup>1</sup> · [**Giuseppe Gallipoli**]()<sup>1</sup> · [**Luca Cagliero**]()<sup>1</sup> · [**Paolo Garza**](https://dbdmg.polito.it/dbdmg_web/people/paolo-garza/)<sup>1</sup>
+
+<sup>1</sup>Politecnico di Torino, Italy
 
 </div>
 
@@ -13,9 +15,6 @@ This is the official repository for the paper "Text-to-Remote-Sensing-Image retr
 ## Resources
 
 ### Corpus
-
-A partial dataset was released anonymously on [Zenodo](https://zenodo.org/records/14750808) due to size limitation (46GB for this release).
-The full non-anonymous version will be released on HuggingFace.
 
 _SOON_
 
