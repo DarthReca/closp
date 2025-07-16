@@ -13,6 +13,8 @@
 
 This is the official repository for the paper "Text-to-Remote-Sensing-Image retrieval beyond RGB sources". This repository contains the code and resources for the experiments presented in the paper.
 
+*REPOSITORY IN CONSTRUCTION*
+
 ## Getting Started
 Install the dependencies of the *requirements.txt* file. Make sure to edit the config files in the `configs/` folder. Then simply run *main.py*
 
