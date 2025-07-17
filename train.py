@@ -3,6 +3,9 @@ import json
 import os
 
 import comet_ml
+import comet_ml.integration
+import comet_ml.integration.pytorch
+import h5py
 import hydra
 import numpy as np
 import polars as pl
@@ -12,17 +15,20 @@ import torch.utils.data as data
 from lightning import seed_everything
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image, ImageFile
+from timm.utils import freeze, unfreeze
 from torch import optim
+from torchgeo.models import ResNet50_Weights, resnet50
 from tqdm import tqdm
+from transformers import AutoModel, AutoTokenizer
 
-from dataset import CrisisLandMarkDataModule
-from models import CLOSP, GeoCLOSP, SkyScript
+from dataset import GeoCrisisDataModule
+from models import GeoCLIP, LocGeoCLIP, RemoteCLIP, RGBGeoCLIP, SenCLIP, SkyScript
 
 EPOCHS = 30
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
-@hydra.main(config_path="configs", config_name="long_context", version_base=None)
+@hydra.main(config_path="configs", config_name="default", version_base=None)
 def main(args: DictConfig):
     seed_everything(42)
     uuid = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -38,7 +44,7 @@ def main(args: DictConfig):
 
     experiment.log_parameters(OmegaConf.to_container(args))
 
-    dm = CrisisLandMarkDataModule(**args.dataset)
+    dm = GeoCrisisDataModule(**args.dataset)
     dm.setup("fit")
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -51,16 +57,24 @@ def main(args: DictConfig):
     val_dataloader = dm.val_dataloader()
     if args.get("skyclip", False):
         model = SkyScript(device).to(device)
+    elif args.get("senclip", False):
+        model = SenCLIP(device).to(device)
+    elif args.get("remoteclip", False):
+        model = RemoteCLIP(device=device).to(device)
+    elif args.dataset.get("rgb_only", False):
+        model = RGBGeoCLIP(mode="train").to(device)
     elif args.dataset.get("return_coords", False):
-        model = GeoCLOSP(**args.model).to(device)
+        model = LocGeoCLIP(**args.model).to(device)
     else:
-        model = CLOSP(**args.model).to(device)
+        model = GeoCLIP(**args.model).to(device)
     experiment.set_model_graph(model)
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    params = model.parameters()
+    max_lrs = args.lr
+    optimizer = optim.AdamW(params, lr=args.lr)
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=args.lr,
+        max_lr=max_lrs,
         steps_per_epoch=len(iter(train_dataloader)),
         epochs=EPOCHS,
         div_factor=1e6,
@@ -76,8 +90,6 @@ def main(args: DictConfig):
     # finetuning contrastive like CLIP
     for epoch in range(EPOCHS):
         print("EPOCH", epoch + 1)
-        if hasattr(model, "freeze_pretrained") and epoch + 1 > args.warmup:
-            model.freeze_pretrained(freeze=False)
         # TRAIN
         with experiment.train():
             if hasattr(model, "mode"):
@@ -87,29 +99,33 @@ def main(args: DictConfig):
             satellite_loss = {"s1": 0, "s2": 0}
             satellite_batches = {"s1": 0, "s2": 0}
             for i, (batch, batch_idx, dl_idx) in progress:
-                for batch in [*batch]:
-                    optimizer.zero_grad()
-                    satellite = "s1" if batch["image"].shape[1] == 2 else "s2"
+                optimizer.zero_grad()
+                total_loss = 0
+                for mini_batch in batch:
+                    satellite = "s1" if mini_batch["image"].shape[1] == 2 else "s2"
                     inputs = {
-                        "image": batch["image"].to(device),
-                        "input_ids": batch["input_ids"].to(device),
-                        "attention_mask": batch["attention_mask"].to(device),
+                        "image": mini_batch["image"].to(device),
+                        "input_ids": mini_batch["input_ids"].to(device),
+                        "attention_mask": mini_batch["attention_mask"].to(device),
                     }
-                    if "coords" in batch:
-                        inputs["coords"] = batch["coords"].to(device)
-                    outputs = model(**inputs)
-
+                    if "coords" in mini_batch:
+                        inputs["coords"] = mini_batch["coords"].to(device)
+                    outputs = model(**inputs, training=True)
+                    # We extract only the last two or three outputs
                     outputs = outputs[len(outputs) // 2 :]
-                    ground_truth = torch.arange(len(batch["input_ids"])).to(device)
-                    loss = (
+                    ground_truth = torch.arange(len(mini_batch["input_ids"])).to(device)
+                    loss: list[torch.Tensor] = (
                         ls(o, ground_truth)
                         for o, ls in zip(outputs, [loss_img, loss_txt, loss_loc])
                     )
                     loss = sum(loss) / len(outputs)
-                    loss.backward()
-                    optimizer.step()
                     satellite_loss[satellite] += loss.item()
                     satellite_batches[satellite] += 1
+                    total_loss += loss
+
+                total_loss /= len(batch)
+                total_loss.backward()
+                optimizer.step()
                 scheduler.step()
 
                 if i % step == 0 and i > 0:
@@ -129,11 +145,12 @@ def main(args: DictConfig):
                             v / (satellite_batches[k] + 1e-8),
                             step=epoch * len(train_dataloader) + i,
                         )
-                    experiment.log_metric(
-                        "learning_rate",
-                        scheduler.get_last_lr()[0],
-                        step=epoch * len(train_dataloader) + i,
-                    )
+                    for g, lr in enumerate(scheduler.get_last_lr()):
+                        experiment.log_metric(
+                            f"learning_rate_{g}",
+                            lr,
+                            step=epoch * len(train_dataloader) + i,
+                        )
                     satellite_loss = {"s1": 0, "s2": 0}
                     satellite_batches = {"s1": 0, "s2": 0}
                     previous_loss = current_loss
@@ -155,7 +172,7 @@ def main(args: DictConfig):
                     }
                     if "coords" in batch:
                         inputs["coords"] = batch["coords"].to(device)
-                    outputs = model(**inputs)
+                    outputs = model(**inputs, training=False)
                     outputs = outputs[len(outputs) // 2 :]
                     ground_truth = torch.arange(len(batch["input_ids"])).to(device)
                     loss = (
