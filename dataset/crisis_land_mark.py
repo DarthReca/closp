@@ -1,25 +1,23 @@
-import json
-from pathlib import Path
+import os
+from typing import Callable, Literal
 
 import h5py
-import matplotlib.pyplot as plt
-import numpy as np
-import open_clip
-import polars as pl
-import xarray as xr
+import hdf5plugin
+import pandas as pd
+import torch
 from lightning.pytorch.utilities import CombinedLoader
-from pyproj import Proj
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from torchgeo.datamodules import NonGeoDataModule
 from torchgeo.datasets import NonGeoDataset
-from transformers import AutoTokenizer
+
+from .mapping import CORINE_TO_DW
 
 
 class CrisisLandMarkDataModule(NonGeoDataModule):
     def __init__(self, root: str, batch_size: int = 32, num_workers: int = 0, **kwargs):
         super().__init__(
-            CrisisLandMark,
+            CrisisLandMarkDataset,
             root=root,
             batch_size=batch_size,
             num_workers=num_workers,
@@ -27,27 +25,20 @@ class CrisisLandMarkDataModule(NonGeoDataModule):
         )
         self.aug = nn.Identity()
 
-    def setup(self, stage):
-        if self.kwargs["satellite_type"] == "all":
-            kwargs = {k: v for k, v in self.kwargs.items() if k != "satellite_type"}
+    def setup(self, stage: str):
+        if self.kwargs["satellite"] == "all":
+            kwargs = {k: v for k, v in self.kwargs.items() if k != "satellite"}
             if stage in ["fit"]:
                 self.train_dataset = [
                     self.dataset_class(  # type: ignore[call-arg]
-                        split="train", satellite_type=s, **kwargs
-                    )
-                    for s in ["s2", "s1"]
-                ]
-            if stage in ["fit", "validate"]:
-                self.val_dataset = [
-                    self.dataset_class(  # type: ignore[call-arg]
-                        split="val", satellite_type=s, **kwargs
+                        split="train", satellite=s, **kwargs
                     )
                     for s in ["s2", "s1"]
                 ]
             if stage in ["test"]:
                 self.test_dataset = [
                     self.dataset_class(  # type: ignore[call-arg]
-                        split="test", satellite_type=s, **kwargs
+                        split="test", satellite=s, **kwargs
                     )
                     for s in ["s2", "s1"]
                 ]
@@ -87,157 +78,105 @@ class CrisisLandMarkDataModule(NonGeoDataModule):
         )
 
 
-class CrisisLandMark(NonGeoDataset):
+class CrisisLandMarkDataset(NonGeoDataset):
     satellite_datasets = {
         "s2": ["benv2s2", "cabuar", "sen2flood"],
         "s1": ["benv2s1", "mmflood", "sen1flood", "quakeset"],
-        "all": ["benv2s1", "benv2s2", "cabuar", "mmflood", "sen1flood", "sen2flood"],
-    }
-    text_encoders = {
-        "MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",
-        "openclip": "RN50",
     }
 
     def __init__(
         self,
         root: str,
-        split: str = "train",
-        transform=None,
-        target_transform=None,
-        rgb_only=False,
-        tokenizer: str | None = None,
-        context_length: int = 77,
-        satellite_type: str = "all",
-        return_key: bool = False,
-        return_coords: bool = False,
-        augment_labels: bool = False,
+        split: Literal["train", "test"],
+        transform: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]]
+        | None = None,
+        download: bool = False,
+        satellite: Literal["s2", "s1"] = "s2",
     ):
-        """
-        Args:
-            root (str): Root directory where the dataset is stored.
-            split (str, optional): The dataset split, supports ``train``, and ``test``.
-            transform (callable, optional): A function/transform that takes in an PIL image and returns a transformed version.
-            target_transform (callable, optional): A function/transform that takes in the target and transforms it.
-        """
-        assert split in ["train", "val", "test"]
-        self.rgb_only = rgb_only
-        self.return_key = return_key
-        self.return_coords = return_coords
-        self.tokenizer = None
-        if tokenizer and tokenizer != "openclip":
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.text_encoders.get(tokenizer, tokenizer),
-                use_fast=True,
-                cache_dir="cache",
-            )
-        elif tokenizer == "openclip":
-            self.tokenizer = open_clip.get_tokenizer(self.text_encoders["openclip"])
+        super().__init__()
 
-        self.samples = pl.scan_parquet(f"{root}/geocrisis.parquet")
-        fraction = 0.002 if split == "val" else 1.0
-        split = "training" if split == "train" else "corpus"
-        keys = pl.read_parquet(f"{root}/splits.parquet").filter(split=split)["key"]
+        # --- 1. Validate inputs ---
+        if split not in ["train", "test"]:
+            raise ValueError(f"Split must be 'train' or 'test', but got {split}")
 
-        self.samples = (
-            self.samples.filter(pl.col("key").is_in(keys))
-            .explode("labels")
-            .with_columns(
-                pl.col("labels").str.to_lowercase(),
-                original_labels=pl.col("labels"),
-            )
-        )
-        self.samples = (
-            self.samples.group_by("file", "key")
-            .agg("labels", "original_labels")
-            .with_columns(
-                pl.col("labels").list.join(". ").str.to_lowercase(),
-                pl.col("original_labels").list.join(". ").str.to_lowercase(),
-            )
-        ).filter(
-            pl.col("key").str.contains_any(self.satellite_datasets[satellite_type])
-        )
+        self.root_dir = root
+        self.split = split
+        self.transform = transform
 
-        self.samples = (
-            self.samples.sort("key").collect().sample(fraction=fraction, seed=42)
-        )
-        if self.tokenizer is not None:
-            if isinstance(self.tokenizer, open_clip.SimpleTokenizer):
-                batch_encoding = {
-                    "input_ids": self.tokenizer(
-                        self.samples["labels"].to_list()
-                    ).numpy(),
-                    "attention_mask": np.ones((len(self.samples), 77)),
-                }
-            else:
-                batch_encoding = self.tokenizer(
-                    self.samples["labels"].to_list(),
-                    padding="max_length",
-                    truncation=True,
-                    max_length=context_length,
-                    return_tensors="np",
-                )
-            self.samples = self.samples.with_columns(
-                input_ids=batch_encoding["input_ids"],
-                attention_mask=batch_encoding["attention_mask"],
+        # --- 2. Define file paths ---
+        self.h5_path = os.path.join(self.root_dir, "crisislandmark.h5")
+        self.metadata_path = os.path.join(self.root_dir, "metadata.parquet")
+
+        if not os.path.exists(self.h5_path):
+            raise FileNotFoundError(f"crisislandmark.h5 not found at {self.h5_path}")
+        if not os.path.exists(self.metadata_path):
+            raise FileNotFoundError(
+                f"metadata.parquet not found at {self.metadata_path}"
             )
+
+        # --- 3. Load metadata and filter for the correct split ---
+        metadata_df = pd.read_parquet(self.metadata_path)
+
+        # Filter the sample keys based on the desired split
+        metadata_df = metadata_df[metadata_df["split"] == self.split]
+        metadata_df = metadata_df[
+            metadata_df["key"].str.contains(
+                "|".join(self.satellite_datasets[satellite]), regex=True
+            )
+        ]
+        metadata_df = metadata_df[["key", "labels"]].explode("labels")
+
+        lowered_map = {k.lower(): v.lower() for k, v in CORINE_TO_DW.items()}
+        lowered_map |= {k: k.lower() for k in metadata_df["labels"].unique()}
+        metadata_df["labels"] = metadata_df["labels"].str.lower().map(lowered_map)
+        metadata_df = metadata_df.groupby("key").agg(set)
+        self.sample_keys = metadata_df.to_records(index=True)
 
     def __len__(self):
-        return self.samples.height
+        """Returns the total number of samples in the dataset."""
+        return len(self.sample_keys)
 
-    def __getitem__(self, idx):
-        if idx >= len(self):
-            raise IndexError
-        sample = self.samples.row(idx, named=True)
-        path = sample["file"]
-        key = sample["key"]
-        with h5py.File(path, "r") as f:
-            data = f[key]["image"][:]
-            center = f[key]["coords"][:, 60, 60]
-            crs = f[key].attrs["crs"]
-        if any([x in path for x in ["benv2s1", "sen1flood"]]):
-            data = np.flip(data, axis=0)
-        if "quakeset" in path:
-            data = data[2:]
-        # Add a zero-ed channel for S2 band 10
-        if data.shape[0] == 12:
-            data = np.insert(data, 10, 0, axis=0)
-            data = np.nan_to_num(data, nan=0)
-        else:
-            data = np.nan_to_num(data, nan=1e-6)
-        # Extract RGB bands if needed
-        if self.rgb_only:
-            if data.shape[0] == 12:
-                data = data[(3, 2, 1), :]
-            else:
-                data = np.stack([data[0], data[1], data[0] - data[1]])
-        tokenization_results = {}
-        if self.tokenizer is not None:
-            tokenization_results["attention_mask"] = np.array(sample["attention_mask"])
-            tokenization_results["input_ids"] = np.array(sample["input_ids"])
-        if self.return_key:
-            tokenization_results |= {"key": key}
-        if self.return_coords:
-            tokenization_results |= {
-                "coords": np.array(
-                    Proj(crs)(center[0], center[1], inverse=True), dtype=np.float32
-                )
-            }
-        return {
-            "image": np.ascontiguousarray(data),
-            "labels": sample.get("labels"),
-        } | tokenization_results
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor | str | list[str]]:
+        """
+        Retrieves a sample from the dataset at the given index.
 
-    def plot(self, image, ax=None):
-        rgb = image
-        if image.shape[0] in (12, 13):
-            rgb = image[(3, 2, 1), :] / 10000 * 5
-        elif image.shape[0] == 2:
-            rgb = np.stack([image[0], image[1], image[0] - image[1]])
-            rgb = rgb[0]
-        return xr.DataArray(rgb).plot.imshow(
-            figsize=(10, 10),
-            robust=True,
-            ax=ax,
-            cmap=None if rgb.shape[0] == 3 else "gray",
-            add_colorbar=False,
-        )
+        Args:
+            idx (int): The index of the sample to retrieve.
+
+        Returns:
+            dict: A dictionary containing the image, coordinates, labels, and other metadata.
+                  The image and coordinates are returned as PyTorch tensors.
+        """
+        # Get the unique key for the sample
+        key, labels = self.sample_keys[idx]
+
+        with h5py.File(self.h5_path, "r") as f:
+            sample_group = f[key]
+
+            # Read data arrays
+            image_np = sample_group["image"][:]
+            coords_np = sample_group["coords"][:]
+
+            # Read metadata attributes
+            try:
+                crs = sample_group.attrs["crs"]
+                timestamp = sample_group.attrs["timestamp"]
+            except KeyError as e:
+                print(f"Missing attribute in {key}: {e}")
+                raise KeyError(f"Missing attribute in {key}: {e}") from e
+
+        # --- Convert NumPy arrays to PyTorch tensors ---
+        image_tensor = torch.from_numpy(image_np).float()
+        coords_tensor = torch.from_numpy(coords_np).float()
+
+        # --- Assemble the sample dictionary ---
+        sample = {"image": image_tensor, "coords": coords_tensor}
+
+        # --- Apply transforms if any ---
+        if self.transform:
+            sample = self.transform(sample)
+
+        # --- Add metadata ---
+        sample |= {"labels": ". ".join(labels), "crs": crs, "timestamp": timestamp}
+
+        return sample
