@@ -9,7 +9,8 @@ from lightning.pytorch.utilities import CombinedLoader
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from torchgeo.datamodules import NonGeoDataModule
-from torchgeo.datasets import NonGeoDataset
+from torchgeo.datasets import DatasetNotFoundError, NonGeoDataset
+from torchgeo.datasets.utils import download_url
 
 from .mapping import CORINE_TO_DW
 
@@ -83,6 +84,22 @@ class CrisisLandMarkDataset(NonGeoDataset):
         "s2": ["benv2s2", "cabuar", "sen2flood"],
         "s1": ["benv2s1", "mmflood", "sen1flood", "quakeset"],
     }
+    filenames_urls = {
+        "crisislandmark.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/crisislandmark.h5",
+        "metadata.parquet": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/metadata.parquet",
+        "benv2s2_part1.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/benv2s2_part1.h5",
+        "benv2s1_part1.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/benv2s1_part1.h5",
+        "cabuar.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/cabuar.h5",
+        "benv2s2_part4.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/benv2s2_part4.h5",
+        "benv2s2_part3.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/benv2s2_part3.h5",
+        "benv2s2_part2.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/benv2s2_part2.h5",
+        "benv2s1_part3.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/benv2s1_part3.h5",
+        "sen12flood.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/sen12flood.h5",
+        "benv2s1_part4.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/benv2s1_part4.h5",
+        "mmflood.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/mmflood.h5",
+        "benv2s1_part2.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/benv2s1_part2.h5",
+        "quakeset.h5": "https://huggingface.co/datasets/DarthReca/crisislandmark/resolve/main/quakeset.h5",
+    }
 
     def __init__(
         self,
@@ -99,13 +116,16 @@ class CrisisLandMarkDataset(NonGeoDataset):
         if split not in ["train", "test"]:
             raise ValueError(f"Split must be 'train' or 'test', but got {split}")
 
-        self.root_dir = root
+        self.root = root
         self.split = split
         self.transform = transform
+        self.download = download
+
+        self._verify()
 
         # --- 2. Define file paths ---
-        self.h5_path = os.path.join(self.root_dir, "crisislandmark.h5")
-        self.metadata_path = os.path.join(self.root_dir, "metadata.parquet")
+        self.h5_path = os.path.join(self.root, "crisislandmark.h5")
+        self.metadata_path = os.path.join(self.root, "metadata.parquet")
 
         if not os.path.exists(self.h5_path):
             raise FileNotFoundError(f"crisislandmark.h5 not found at {self.h5_path}")
@@ -180,3 +200,33 @@ class CrisisLandMarkDataset(NonGeoDataset):
         sample |= {"labels": ". ".join(labels), "crs": crs, "timestamp": timestamp}
 
         return sample
+
+    def _verify(self) -> None:
+        """Verify the integrity of the dataset."""
+        # Check if the files already exist
+        exists = []
+        for filename in self.filenames_urls.keys():
+            filepath = os.path.join(self.root, filename)
+            exists.append(os.path.exists(filepath))
+
+        if all(exists):
+            return
+
+        # Check if the user requested to download the dataset
+        if not self.download:
+            raise DatasetNotFoundError(self)
+
+        # Download the dataset
+        self._download()
+
+    def _download(self) -> None:
+        """Download the dataset."""
+        for filename, url in self.filenames_urls.items():
+            filepath = os.path.join(self.root, filename)
+            if not os.path.exists(filepath):
+                download_url(
+                    url,
+                    self.root,
+                    filename=filename,
+                    md5=None,
+                )
