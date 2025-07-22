@@ -111,12 +111,12 @@ def main(args: DictConfig):
                     if "coords" in mini_batch:
                         inputs["coords"] = mini_batch["coords"].to(device)
                     outputs = model(**inputs, training=True)
-                    # We extract only the last two or three outputs
+                    # We extract only the last two or four outputs
                     outputs = outputs[len(outputs) // 2 :]
                     ground_truth = torch.arange(len(mini_batch["input_ids"])).to(device)
                     loss: list[torch.Tensor] = (
                         ls(o, ground_truth)
-                        for o, ls in zip(outputs, [loss_img, loss_txt, loss_loc])
+                        for o, ls in zip(outputs, [loss_img, loss_txt, loss_loc, loss_loc])
                     )
                     loss = sum(loss) / len(outputs)
                     satellite_loss[satellite] += loss.item()
