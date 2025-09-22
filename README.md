@@ -1,6 +1,6 @@
 <div align="center">
   
-## Text-to-Remote-Sensing-Image retrieval beyond RGB sources
+## CLOSP: A Unified Semantic Space for SAR, MSI, and Text in Remote Sensing
 
 [**Daniele Rege Cambrin**](https://darthreca.github.io/)<sup>1</sup> · [**Lorenzo Vaiani**](https://scholar.google.com/citations?user=JQVjbNEAAAAJ&hl=it&oi=sra)<sup>1</sup> · [**Giuseppe Gallipoli**]()<sup>1</sup> · [**Luca Cagliero**]()<sup>1</sup> · [**Paolo Garza**](https://dbdmg.polito.it/dbdmg_web/people/paolo-garza/)<sup>1</sup>
 
